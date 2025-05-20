@@ -36,7 +36,7 @@ if (!fs.existsSync(pythonScriptPath)) {
 // Configure CORS - allow requests from your Vercel frontend URL
 const allowedOrigins = [
   'http://localhost:3000',  // Local React development
-  'https://your-app-name.vercel.app' // Replace with your actual Vercel domain
+  'https://ai-outreach-agent-frontend.vercel.app/' // Replace with your actual Vercel domain
 ];
 
 app.use(cors({
