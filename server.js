@@ -4,11 +4,13 @@ const multer = require('multer');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const { promisify } = require('util');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const access = promisify(fs.access);
 
-// Create required directories if they don't exist
+// Create required directories
 const publicDir = path.join(__dirname, 'public');
 const pythonDir = path.join(__dirname, 'python');
 
@@ -18,11 +20,8 @@ const pythonDir = path.join(__dirname, 'python');
   }
 });
 
-// Verify Python script exists
+// Python script configuration
 const pythonScriptPath = path.join(pythonDir, 'ai_agent.py');
-if (!fs.existsSync(pythonScriptPath)) {
-  console.error('Python script not found at:', pythonScriptPath);
-}
 
 // CORS Configuration
 const allowedOrigins = [
@@ -38,17 +37,18 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Enable preflight for all routes
 app.options('*', cors());
 
 // Middleware
 app.use(express.json());
 app.use(express.static(publicDir));
 
-// Multer configuration for file upload
+// Multer configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, __dirname);
@@ -67,49 +67,61 @@ const upload = multer({
     }
     cb(null, true);
   },
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB
+  }
 });
 
 // Process Excel File
-app.post('/api/process', upload.single('excelFile'), (req, res) => {
+app.post('/api/process', upload.single('excelFile'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ 
-        message: 'No file uploaded',
-        error: 'Please upload an Excel file'
+    // Verify Python script exists and is executable
+    try {
+      await access(pythonScriptPath, fs.constants.R_OK | fs.constants.X_OK);
+    } catch (err) {
+      console.error('Python script access error:', err);
+      return res.status(500).json({
+        message: 'Server configuration error',
+        error: 'Python script not accessible'
       });
     }
 
-    if (!fs.existsSync(pythonScriptPath)) {
-      return res.status(500).json({
-        message: 'Server configuration error',
-        error: 'Python script not found'
-      });
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
     }
 
     const inputPath = path.join(__dirname, 'uploaded_file.xlsx');
     const outputPath = path.join(publicDir, 'outreach_results.xlsx');
 
-    console.log(`Processing file: ${req.file.originalname}`);
-    console.log(`Python script: ${pythonScriptPath}`);
+    console.log(`Starting Python process with: ${pythonScriptPath} ${inputPath} ${outputPath}`);
 
-    const pythonProcess = spawn('python', [
+    const pythonProcess = spawn('python3', [
       pythonScriptPath,
       inputPath,
       outputPath
-    ]);
+    ], {
+      timeout: 300000 // 5 minute timeout
+    });
 
     let pythonData = '';
     let pythonError = '';
 
     pythonProcess.stdout.on('data', (data) => {
       pythonData += data.toString();
-      console.log(`Python output: ${data}`);
+      console.log(`Python stdout: ${data}`);
     });
 
     pythonProcess.stderr.on('data', (data) => {
       pythonError += data.toString();
-      console.error(`Python error: ${data}`);
+      console.error(`Python stderr: ${data}`);
+    });
+
+    pythonProcess.on('error', (err) => {
+      console.error('Python process error:', err);
+      return res.status(500).json({
+        message: 'Failed to start Python script',
+        error: err.message
+      });
     });
 
     pythonProcess.on('close', (code) => {
@@ -189,7 +201,8 @@ app.get('/api/status', (req, res) => {
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    pythonScript: fs.existsSync(pythonScriptPath) ? 'Available' : 'Missing'
   });
 });
 
