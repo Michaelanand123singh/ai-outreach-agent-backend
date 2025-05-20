@@ -8,58 +8,47 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Create public directory if it doesn't exist
+// Create required directories if they don't exist
 const publicDir = path.join(__dirname, 'public');
-if (!fs.existsSync(publicDir)) {
-  fs.mkdirSync(publicDir, { recursive: true });
-}
-
-// Create python directory if it doesn't exist
 const pythonDir = path.join(__dirname, 'python');
-if (!fs.existsSync(pythonDir)) {
-  fs.mkdirSync(pythonDir, { recursive: true });
-}
 
-// Ensure the Python script exists in the python directory
+[publicDir, pythonDir].forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+// Verify Python script exists
 const pythonScriptPath = path.join(pythonDir, 'ai_agent.py');
 if (!fs.existsSync(pythonScriptPath)) {
-  const sourceScriptPath = path.join(__dirname, 'ai_agent.py');
-  if (fs.existsSync(sourceScriptPath)) {
-    fs.copyFileSync(sourceScriptPath, pythonScriptPath);
-  } else {
-    console.error('Python script not found. Make sure ai_agent.py exists in your repository.');
-  }
+  console.error('Python script not found at:', pythonScriptPath);
 }
 
-// ✅ Corrected allowedOrigins (no trailing slash)
+// CORS Configuration
 const allowedOrigins = [
   'http://localhost:3000',
   'https://ai-outreach-agent-frontend.vercel.app'
 ];
 
-// ✅ CORS middleware
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
     } else {
-      return callback(new Error('Not allowed by CORS'), false);
+      callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true
 }));
 
-app.use(express.json());
-app.use(express.static('public', {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.xlsx')) {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    }
-  }
-}));
+// Enable preflight for all routes
+app.options('*', cors());
 
-// Multer configuration
+// Middleware
+app.use(express.json());
+app.use(express.static(publicDir));
+
+// Multer configuration for file upload
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, __dirname);
@@ -78,104 +67,135 @@ const upload = multer({
     }
     cb(null, true);
   },
-  limits: {
-    fileSize: 5 * 1024 * 1024
-  }
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
-// Endpoint to process uploaded Excel file
+// Process Excel File
 app.post('/api/process', upload.single('excelFile'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ message: 'No file uploaded' });
-  }
-
-  console.log(`Excel file uploaded: ${req.file.originalname}`);
-
-  const pythonProcess = spawn('python', [
-    path.join(__dirname, 'python', 'ai_agent.py'),
-    path.join(__dirname, 'uploaded_file.xlsx'),
-    path.join(__dirname, 'public', 'outreach_results.xlsx')
-  ]);
-
-  let pythonData = '';
-  let pythonError = '';
-
-  pythonProcess.stdout.on('data', (data) => {
-    pythonData += data.toString();
-    console.log(`Python stdout: ${data}`);
-  });
-
-  pythonProcess.stderr.on('data', (data) => {
-    pythonError += data.toString();
-    console.error(`Python stderr: ${data}`);
-  });
-
-  pythonProcess.on('close', (code) => {
-    console.log(`Python process exited with code ${code}`);
-
-    if (code !== 0) {
-      return res.status(500).json({
-        message: 'Error processing the file',
-        error: pythonError
+  try {
+    if (!req.file) {
+      return res.status(400).json({ 
+        message: 'No file uploaded',
+        error: 'Please upload an Excel file'
       });
     }
 
-    let pythonResults = { processedCount: 0, contactsFound: 0 };
-
-    try {
-      const jsonStartIdx = pythonData.indexOf('{');
-      const jsonEndIdx = pythonData.lastIndexOf('}');
-      if (jsonStartIdx !== -1 && jsonEndIdx !== -1) {
-        const jsonStr = pythonData.substring(jsonStartIdx, jsonEndIdx + 1);
-        pythonResults = JSON.parse(jsonStr);
-      }
-    } catch (err) {
-      console.error('Error parsing Python output:', err);
-    }
-
-    const outputFilePath = path.join(__dirname, 'public', 'outreach_results.xlsx');
-    if (!fs.existsSync(outputFilePath)) {
+    if (!fs.existsSync(pythonScriptPath)) {
       return res.status(500).json({
-        message: 'Output file not generated',
-        error: pythonError || 'Unknown error'
+        message: 'Server configuration error',
+        error: 'Python script not found'
       });
     }
 
-    return res.json({
-      message: 'File processed successfully',
-      fileUrl: '/api/download',
-      processedCount: pythonResults.processedCount || 0,
-      contactsFound: pythonResults.contactsFound || 0
+    const inputPath = path.join(__dirname, 'uploaded_file.xlsx');
+    const outputPath = path.join(publicDir, 'outreach_results.xlsx');
+
+    console.log(`Processing file: ${req.file.originalname}`);
+    console.log(`Python script: ${pythonScriptPath}`);
+
+    const pythonProcess = spawn('python', [
+      pythonScriptPath,
+      inputPath,
+      outputPath
+    ]);
+
+    let pythonData = '';
+    let pythonError = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      pythonData += data.toString();
+      console.log(`Python output: ${data}`);
     });
-  });
-});
 
-// File download endpoint
-app.get('/api/download', (req, res) => {
-  const filePath = path.join(__dirname, 'public', 'outreach_results.xlsx');
+    pythonProcess.stderr.on('data', (data) => {
+      pythonError += data.toString();
+      console.error(`Python error: ${data}`);
+    });
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ message: 'File not found' });
+    pythonProcess.on('close', (code) => {
+      console.log(`Python process exited with code ${code}`);
+
+      if (code !== 0) {
+        return res.status(500).json({
+          message: 'Error processing file',
+          error: pythonError || 'Python script failed'
+        });
+      }
+
+      try {
+        const outputExists = fs.existsSync(outputPath);
+        if (!outputExists) {
+          throw new Error('Output file not generated');
+        }
+
+        let results = { processedCount: 0, contactsFound: 0 };
+        try {
+          const jsonMatch = pythonData.match(/\{.*\}/);
+          if (jsonMatch) results = JSON.parse(jsonMatch[0]);
+        } catch (e) {
+          console.warn('Could not parse Python output:', e);
+        }
+
+        return res.json({
+          message: 'File processed successfully',
+          fileUrl: '/api/download',
+          ...results
+        });
+      } catch (err) {
+        return res.status(500).json({
+          message: 'Output generation failed',
+          error: err.message
+        });
+      }
+    });
+  } catch (err) {
+    console.error('Server error:', err);
+    return res.status(500).json({
+      message: 'Internal server error',
+      error: err.message
+    });
   }
-
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename=outreach_results.xlsx');
-  res.setHeader('Content-Length', fs.statSync(filePath).size);
-
-  const fileStream = fs.createReadStream(filePath);
-  fileStream.pipe(res);
 });
 
-// Health check endpoint
+// Download Endpoint
+app.get('/api/download', (req, res) => {
+  try {
+    const filePath = path.join(publicDir, 'outreach_results.xlsx');
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ 
+        message: 'File not found',
+        error: 'Results file does not exist'
+      });
+    }
+
+    res.setHeader('Content-Type', 
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 
+      'attachment; filename=outreach_results.xlsx');
+
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+  } catch (err) {
+    res.status(500).json({
+      message: 'Download failed',
+      error: err.message
+    });
+  }
+});
+
+// Health Check
 app.get('/api/status', (req, res) => {
   res.json({
-    status: 'Server is running',
+    status: 'OK',
+    timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Start server
+// Start Server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Python script path: ${pythonScriptPath}`);
+  console.log(`Allowed origins: ${allowedOrigins.join(', ')}`);
 });
